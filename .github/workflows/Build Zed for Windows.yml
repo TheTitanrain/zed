@@ -28,12 +28,8 @@ jobs:
 
       - name: Установка Windows SDK через Visual Studio Installer
         run: |
-          cd "C:\Program Files (x86)\Microsoft Visual Studio\Installer\"
-          $InstallPath = "C:\Program Files\Microsoft Visual Studio\2022\BuildTools"
-          $WorkLoads = '--add Microsoft.VisualStudio.Component.Windows10SDK.20348 --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.26100'
-          $Arguments = ('/c', "vs_installer.exe", 'modify', '--installPath', "`"$InstallPath`"", $WorkLoads, '--quiet', '--norestart', '--nocache')
-          $process = Start-Process -FilePath cmd.exe -ArgumentList $Arguments -Wait -PassThru -WindowStyle Hidden
-        shell: powershell
+          "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\BuildTools" ^ --add Microsoft.VisualStudio.Component.Windows10SDK.20348 ^ --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ^ --add Microsoft.VisualStudio.Component.Windows11SDK.26100
+        shell: cmd
 
       - name: Компиляция Zed (Release)
         run: cargo build --release

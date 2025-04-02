@@ -1,0 +1,42 @@
+name: Build Zed for Windows
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Установка Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Установка зависимостей
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+          choco install visualstudio2022buildtools -y
+          choco install visualstudio2022-workload-vctools -y
+          choco install windows-sdk-10-version-2104 -y
+          echo "SDK_PATH=C:\Program Files (x86)\Windows Kits\10" >> $GITHUB_ENV
+          echo "CMAKE_PATH=C:\Program Files\CMake\bin" >> $GITHUB_ENV
+        shell: bash
+
+      - name: Компиляция Zed (Release)
+        run: cargo build --release
+
+      - name: Запуск тестов
+        run: cargo test --workspace
+
+      - name: Сохранение артефактов
+        uses: actions/upload-artifact@v4
+        with:
+          name: zed-windows-build
+          path: target/release/

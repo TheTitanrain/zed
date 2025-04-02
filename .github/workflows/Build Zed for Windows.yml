@@ -24,12 +24,13 @@ jobs:
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install visualstudio2022buildtools -y
           choco install visualstudio2022-workload-vctools -y
+          choco install windows-sdk-10.1 --version=10.1.15063.468 -y
         shell: bash
 
-      - name: Установка Windows SDK через Visual Studio Installer
+      - name: Установка Windows SDK
         run: |
-          "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\BuildTools" ^ --add Microsoft.VisualStudio.Component.Windows10SDK.20348 ^ --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ^ --add Microsoft.VisualStudio.Component.Windows11SDK.26100
-        shell: cmd
+          choco install windows-sdk-10.1 --version=10.1.15063.468 -y
+        shell: bash
 
       - name: Компиляция Zed (Release)
         run: cargo build --release

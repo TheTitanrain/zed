@@ -19,17 +19,17 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Установка зависимостей (CMake, MSVC)
+      - name: Установка зависимостей (CMake, MSVC, Windows SDK)
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install visualstudio2022buildtools -y
           choco install visualstudio2022-workload-vctools -y
-        shell: bash
-
-      - name: Установка Windows 10 SDK (версия 2104)
-        run: |
-          winget install --id Microsoft.WindowsSDK -e --source msstore
-        shell: powershell
+          # Установка Windows SDK 10.0.20348.0 через Visual Studio Installer
+          "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" ^
+          modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\BuildTools" ^
+          --add Microsoft.VisualStudio.Component.Windows11SDK.26100 ^
+          --add Microsoft.VisualStudio.Component.Windows10SDK.20348
+        shell: cmd
 
       - name: Компиляция Zed (Release)
         run: cargo build --release

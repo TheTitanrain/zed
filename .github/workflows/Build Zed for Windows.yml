@@ -11,6 +11,19 @@ jobs:
     runs-on: windows-latest
 
     steps:
+      - name: Включение длинных путей в Windows
+        run: |
+          reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f
+        shell: cmd
+
+      - name: Настройка Git для поддержки длинных путей
+        run: git config --global core.longpaths true
+
+      - name: Уменьшение длины пути для Cargo и Git
+        run: |
+          echo "CARGO_HOME=C:\cargo" >> $GITHUB_ENV
+          echo "GIT_DIR=C:\git" >> $GITHUB_ENV
+
       - name: Checkout репозитория
         uses: actions/checkout@v4
 
@@ -24,12 +37,6 @@ jobs:
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install visualstudio2022buildtools -y
           choco install visualstudio2022-workload-vctools -y
-          choco install windows-sdk-10.1 --version=10.1.15063.468 -y
-        shell: bash
-
-      - name: Установка Windows SDK
-        run: |
-          choco install windows-sdk-10.1 --version=10.1.15063.468 -y
         shell: bash
 
       - name: Компиляция Zed (Release)

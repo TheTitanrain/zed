@@ -4,12 +4,20 @@ mod tool_picker;
 
 use std::sync::Arc;
 
+use assistant_settings::AssistantSettings;
 use assistant_tool::{ToolSource, ToolWorkingSet};
 use collections::HashMap;
 use context_server::manager::ContextServerManager;
-use gpui::{Action, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable, Subscription};
+use fs::Fs;
+use gpui::{
+    Action, AnyView, App, Entity, EventEmitter, FocusHandle, Focusable, ScrollHandle, Subscription,
+};
 use language_model::{LanguageModelProvider, LanguageModelProviderId, LanguageModelRegistry};
-use ui::{Disclosure, Divider, DividerColor, ElevationIndex, Indicator, Switch, prelude::*};
+use settings::{Settings, update_settings_file};
+use ui::{
+    Disclosure, Divider, DividerColor, ElevationIndex, Indicator, Scrollbar, ScrollbarState,
+    Switch, Tooltip, prelude::*,
+};
 use util::ResultExt as _;
 use zed_actions::ExtensionCategoryFilter;
 
@@ -19,18 +27,22 @@ pub(crate) use manage_profiles_modal::ManageProfilesModal;
 use crate::AddContextServer;
 
 pub struct AssistantConfiguration {
+    fs: Arc<dyn Fs>,
     focus_handle: FocusHandle,
     configuration_views_by_provider: HashMap<LanguageModelProviderId, AnyView>,
     context_server_manager: Entity<ContextServerManager>,
     expanded_context_server_tools: HashMap<Arc<str>, bool>,
-    tools: Arc<ToolWorkingSet>,
+    tools: Entity<ToolWorkingSet>,
     _registry_subscription: Subscription,
+    scroll_handle: ScrollHandle,
+    scrollbar_state: ScrollbarState,
 }
 
 impl AssistantConfiguration {
     pub fn new(
+        fs: Arc<dyn Fs>,
         context_server_manager: Entity<ContextServerManager>,
-        tools: Arc<ToolWorkingSet>,
+        tools: Entity<ToolWorkingSet>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -53,13 +65,19 @@ impl AssistantConfiguration {
             },
         );
 
+        let scroll_handle = ScrollHandle::new();
+        let scrollbar_state = ScrollbarState::new(scroll_handle.clone());
+
         let mut this = Self {
+            fs,
             focus_handle,
             configuration_views_by_provider: HashMap::default(),
             context_server_manager,
             expanded_context_server_tools: HashMap::default(),
             tools,
             _registry_subscription: registry_subscription,
+            scroll_handle,
+            scrollbar_state,
         };
         this.build_provider_configuration_views(window, cx);
         this
@@ -101,7 +119,7 @@ pub enum AssistantConfigurationEvent {
 impl EventEmitter<AssistantConfigurationEvent> for AssistantConfiguration {}
 
 impl AssistantConfiguration {
-    fn render_provider_configuration(
+    fn render_provider_configuration_block(
         &mut self,
         provider: &Arc<dyn LanguageModelProvider>,
         cx: &mut Context<Self>,
@@ -156,7 +174,7 @@ impl AssistantConfiguration {
                     .p(DynamicSpacing::Base08.rems(cx))
                     .bg(cx.theme().colors().editor_background)
                     .border_1()
-                    .border_color(cx.theme().colors().border_variant)
+                    .border_color(cx.theme().colors().border)
                     .rounded_sm()
                     .map(|parent| match configuration_view {
                         Some(configuration_view) => parent.child(configuration_view),
@@ -167,21 +185,102 @@ impl AssistantConfiguration {
             )
     }
 
+    fn render_provider_configuration_section(
+        &mut self,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let providers = LanguageModelRegistry::read_global(cx).providers();
+
+        v_flex()
+            .p(DynamicSpacing::Base16.rems(cx))
+            .pr(DynamicSpacing::Base20.rems(cx))
+            .gap_4()
+            .flex_1()
+            .child(
+                v_flex()
+                    .gap_0p5()
+                    .child(Headline::new("LLM Providers").size(HeadlineSize::Small))
+                    .child(
+                        Label::new("Add at least one provider to use AI-powered features.")
+                            .color(Color::Muted),
+                    ),
+            )
+            .children(
+                providers
+                    .into_iter()
+                    .map(|provider| self.render_provider_configuration_block(&provider, cx)),
+            )
+    }
+
+    fn render_command_permission(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let always_allow_tool_actions = AssistantSettings::get_global(cx).always_allow_tool_actions;
+
+        const HEADING: &str = "Allow running tools without asking for confirmation";
+
+        v_flex()
+            .p(DynamicSpacing::Base16.rems(cx))
+            .pr(DynamicSpacing::Base20.rems(cx))
+            .gap_2()
+            .flex_1()
+            .child(Headline::new("General Settings").size(HeadlineSize::Small))
+            .child(
+                h_flex()
+                    .p_2p5()
+                    .rounded_sm()
+                    .bg(cx.theme().colors().editor_background)
+                    .border_1()
+                    .border_color(cx.theme().colors().border)
+                    .gap_4()
+                    .justify_between()
+                    .flex_wrap()
+                    .child(
+                        v_flex()
+                            .gap_0p5()
+                            .max_w_5_6()
+                            .child(Label::new(HEADING))
+                            .child(Label::new("When enabled, the agent can perform potentially destructive actions without asking for your confirmation.").color(Color::Muted)),
+                    )
+                    .child(
+                        Switch::new(
+                            "always-allow-tool-actions-switch",
+                            always_allow_tool_actions.into(),
+                        )
+                        .on_click({
+                            let fs = self.fs.clone();
+                            move |state, _window, cx| {
+                                let allow = state == &ToggleState::Selected;
+                                update_settings_file::<AssistantSettings>(
+                                    fs.clone(),
+                                    cx,
+                                    move |settings, _| {
+                                        settings.set_always_allow_tool_actions(allow);
+                                    },
+                                );
+                            }
+                        }),
+                    ),
+            )
+    }
+
     fn render_context_servers_section(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let context_servers = self.context_server_manager.read(cx).all_servers().clone();
-        let tools_by_source = self.tools.tools_by_source(cx);
+        let tools_by_source = self.tools.read(cx).tools_by_source(cx);
         let empty = Vec::new();
 
         const SUBHEADING: &str = "Connect to context servers via the Model Context Protocol either via Zed extensions or directly.";
 
         v_flex()
             .p(DynamicSpacing::Base16.rems(cx))
+            .pr(DynamicSpacing::Base20.rems(cx))
             .gap_2()
             .flex_1()
             .child(
                 v_flex()
                     .gap_0p5()
-                    .child(Headline::new("Context Servers (MCP)").size(HeadlineSize::Small))
+                    .child(
+                        Headline::new("Model Context Protocol (MCP) Servers")
+                            .size(HeadlineSize::Small),
+                    )
                     .child(Label::new(SUBHEADING).color(Color::Muted)),
             )
             .children(context_servers.into_iter().map(|context_server| {
@@ -207,10 +306,9 @@ impl AssistantConfiguration {
                     .bg(cx.theme().colors().editor_background)
                     .child(
                         h_flex()
+                            .p_1()
                             .justify_between()
-                            .px_2()
-                            .py_1()
-                            .when(are_tools_expanded, |element| {
+                            .when(are_tools_expanded && tool_count > 1, |element| {
                                 element
                                     .border_b_1()
                                     .border_color(cx.theme().colors().border)
@@ -220,6 +318,7 @@ impl AssistantConfiguration {
                                     .gap_2()
                                     .child(
                                         Disclosure::new("tool-list-disclosure", are_tools_expanded)
+                                            .disabled(tool_count == 0)
                                             .on_click(cx.listener({
                                                 let context_server_id = context_server.id();
                                                 move |this, _event, _window, _cx| {
@@ -240,10 +339,11 @@ impl AssistantConfiguration {
                                     .child(Label::new(context_server.id()))
                                     .child(
                                         Label::new(format!("{tool_count} tools"))
-                                            .color(Color::Muted),
+                                            .color(Color::Muted)
+                                            .size(LabelSize::Small),
                                     ),
                             )
-                            .child(h_flex().child(
+                            .child(
                                 Switch::new("context-server-switch", is_running.into()).on_click({
                                     let context_server_manager =
                                         self.context_server_manager.clone();
@@ -279,7 +379,7 @@ impl AssistantConfiguration {
                                         }
                                     }
                                 }),
-                            )),
+                            ),
                     )
                     .map(|parent| {
                         if !are_tools_expanded {
@@ -289,14 +389,29 @@ impl AssistantConfiguration {
                         parent.child(v_flex().children(tools.into_iter().enumerate().map(
                             |(ix, tool)| {
                                 h_flex()
-                                    .px_2()
+                                    .id("tool-item")
+                                    .pl_2()
+                                    .pr_1()
                                     .py_1()
+                                    .gap_2()
+                                    .justify_between()
                                     .when(ix < tool_count - 1, |element| {
                                         element
                                             .border_b_1()
-                                            .border_color(cx.theme().colors().border)
+                                            .border_color(cx.theme().colors().border_variant)
                                     })
-                                    .child(Label::new(tool.name()))
+                                    .child(
+                                        Label::new(tool.name())
+                                            .buffer_font(cx)
+                                            .size(LabelSize::Small),
+                                    )
+                                    .child(
+                                        IconButton::new(("tool-description", ix), IconName::Info)
+                                            .shape(ui::IconButtonShape::Square)
+                                            .icon_size(IconSize::Small)
+                                            .icon_color(Color::Ignored)
+                                            .tooltip(Tooltip::text(tool.description())),
+                                    )
                             },
                         )))
                     })
@@ -307,7 +422,7 @@ impl AssistantConfiguration {
                     .gap_2()
                     .child(
                         h_flex().w_full().child(
-                            Button::new("add-context-server", "Add Context Server")
+                            Button::new("add-context-server", "Add MCPs Directly")
                                 .style(ButtonStyle::Filled)
                                 .layer(ElevationIndex::ModalSurface)
                                 .full_width()
@@ -323,7 +438,7 @@ impl AssistantConfiguration {
                         h_flex().w_full().child(
                             Button::new(
                                 "install-context-server-extensions",
-                                "Install Context Server Extensions",
+                                "Install MCP Extensions",
                             )
                             .style(ButtonStyle::Filled)
                             .layer(ElevationIndex::ModalSurface)
@@ -350,36 +465,51 @@ impl AssistantConfiguration {
 
 impl Render for AssistantConfiguration {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let providers = LanguageModelRegistry::read_global(cx).providers();
-
         v_flex()
             .id("assistant-configuration")
+            .key_context("AgentConfiguration")
             .track_focus(&self.focus_handle(cx))
-            .bg(cx.theme().colors().panel_background)
+            .relative()
             .size_full()
-            .overflow_y_scroll()
-            .child(self.render_context_servers_section(cx))
-            .child(Divider::horizontal().color(DividerColor::Border))
+            .pb_8()
+            .bg(cx.theme().colors().panel_background)
             .child(
                 v_flex()
-                    .p(DynamicSpacing::Base16.rems(cx))
-                    .mt_1()
-                    .gap_6()
-                    .flex_1()
-                    .child(
-                        v_flex()
-                            .gap_0p5()
-                            .child(Headline::new("LLM Providers").size(HeadlineSize::Small))
-                            .child(
-                                Label::new("Add at least one provider to use AI-powered features.")
-                                    .color(Color::Muted),
-                            ),
-                    )
-                    .children(
-                        providers
-                            .into_iter()
-                            .map(|provider| self.render_provider_configuration(&provider, cx)),
-                    ),
+                    .id("assistant-configuration-content")
+                    .track_scroll(&self.scroll_handle)
+                    .size_full()
+                    .overflow_y_scroll()
+                    .child(self.render_command_permission(cx))
+                    .child(Divider::horizontal().color(DividerColor::Border))
+                    .child(self.render_context_servers_section(cx))
+                    .child(Divider::horizontal().color(DividerColor::Border))
+                    .child(self.render_provider_configuration_section(cx)),
+            )
+            .child(
+                div()
+                    .id("assistant-configuration-scrollbar")
+                    .occlude()
+                    .absolute()
+                    .right(px(3.))
+                    .top_0()
+                    .bottom_0()
+                    .pb_6()
+                    .w(px(12.))
+                    .cursor_default()
+                    .on_mouse_move(cx.listener(|_, _, _window, cx| {
+                        cx.notify();
+                        cx.stop_propagation()
+                    }))
+                    .on_hover(|_, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_any_mouse_down(|_, _window, cx| {
+                        cx.stop_propagation();
+                    })
+                    .on_scroll_wheel(cx.listener(|_, _, _window, cx| {
+                        cx.notify();
+                    }))
+                    .children(Scrollbar::vertical(self.scrollbar_state.clone())),
             )
     }
 }

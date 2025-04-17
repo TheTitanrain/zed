@@ -11,7 +11,7 @@ pub mod fake_provider;
 use anyhow::Result;
 use client::Client;
 use futures::FutureExt;
-use futures::{StreamExt, TryStreamExt as _, future::BoxFuture, stream::BoxStream};
+use futures::{StreamExt, future::BoxFuture, stream::BoxStream};
 use gpui::{AnyElement, AnyView, App, AsyncApp, SharedString, Task, Window};
 use icons::IconName;
 use parking_lot::Mutex;
@@ -20,7 +20,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::fmt;
 use std::ops::{Add, Sub};
-use std::{future::Future, sync::Arc};
+use std::sync::Arc;
 use thiserror::Error;
 use util::serde::is_default;
 
@@ -67,7 +67,7 @@ pub enum LanguageModelCompletionEvent {
 }
 
 /// Indicates the format used to define the input schema for a language model tool.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
 pub enum LanguageModelToolSchemaFormat {
     /// A JSON schema, see https://json-schema.org
     JsonSchema,
@@ -83,7 +83,7 @@ pub enum StopReason {
     ToolUse,
 }
 
-#[derive(Debug, PartialEq, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, PartialEq, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct TokenUsage {
     #[serde(default, skip_serializing_if = "is_default")]
     pub input_tokens: u32,
@@ -93,6 +93,15 @@ pub struct TokenUsage {
     pub cache_creation_input_tokens: u32,
     #[serde(default, skip_serializing_if = "is_default")]
     pub cache_read_input_tokens: u32,
+}
+
+impl TokenUsage {
+    pub fn total_tokens(&self) -> u32 {
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_read_input_tokens
+            + self.cache_creation_input_tokens
+    }
 }
 
 impl Add<TokenUsage> for TokenUsage {
@@ -168,10 +177,6 @@ impl Default for LanguageModelTextStream {
 pub trait LanguageModel: Send + Sync {
     fn id(&self) -> LanguageModelId;
     fn name(&self) -> LanguageModelName;
-    /// If None, falls back to [LanguageModelProvider::icon]
-    fn icon(&self) -> Option<IconName> {
-        None
-    }
     fn provider_id(&self) -> LanguageModelProviderId;
     fn provider_name(&self) -> LanguageModelProviderName;
     fn telemetry_id(&self) -> String;
@@ -266,15 +271,6 @@ pub trait LanguageModel: Send + Sync {
         .boxed()
     }
 
-    fn use_any_tool(
-        &self,
-        request: LanguageModelRequest,
-        name: String,
-        description: String,
-        schema: serde_json::Value,
-        cx: &AsyncApp,
-    ) -> BoxFuture<'static, Result<BoxStream<'static, Result<String>>>>;
-
     fn cache_configuration(&self) -> Option<LanguageModelCacheConfiguration> {
         None
     }
@@ -285,31 +281,10 @@ pub trait LanguageModel: Send + Sync {
     }
 }
 
-impl dyn LanguageModel {
-    pub fn use_tool<T: LanguageModelTool>(
-        &self,
-        request: LanguageModelRequest,
-        cx: &AsyncApp,
-    ) -> impl 'static + Future<Output = Result<T>> {
-        let schema = schemars::schema_for!(T);
-        let schema_json = serde_json::to_value(&schema).unwrap();
-        let stream = self.use_any_tool(request, T::name(), T::description(), schema_json, cx);
-        async move {
-            let stream = stream.await?;
-            let response = stream.try_collect::<String>().await?;
-            Ok(serde_json::from_str(&response)?)
-        }
-    }
-
-    pub fn use_tool_stream<T: LanguageModelTool>(
-        &self,
-        request: LanguageModelRequest,
-        cx: &AsyncApp,
-    ) -> BoxFuture<'static, Result<BoxStream<'static, Result<String>>>> {
-        let schema = schemars::schema_for!(T);
-        let schema_json = serde_json::to_value(&schema).unwrap();
-        self.use_any_tool(request, T::name(), T::description(), schema_json, cx)
-    }
+#[derive(Debug, Error)]
+pub enum LanguageModelKnownError {
+    #[error("Context window limit exceeded ({tokens})")]
+    ContextWindowLimitExceeded { tokens: usize },
 }
 
 pub trait LanguageModelTool: 'static + DeserializeOwned + JsonSchema {
@@ -334,6 +309,9 @@ pub trait LanguageModelProvider: 'static {
     }
     fn default_model(&self, cx: &App) -> Option<Arc<dyn LanguageModel>>;
     fn provided_models(&self, cx: &App) -> Vec<Arc<dyn LanguageModel>>;
+    fn recommended_models(&self, _cx: &App) -> Vec<Arc<dyn LanguageModel>> {
+        Vec::new()
+    }
     fn load_model(&self, _model: Arc<dyn LanguageModel>, _cx: &App) {}
     fn is_authenticated(&self, cx: &App) -> bool;
     fn authenticate(&self, cx: &mut App) -> Task<Result<(), AuthenticateError>>;
@@ -378,7 +356,7 @@ pub trait LanguageModelProviderState: 'static {
     }
 }
 
-#[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]
+#[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct LanguageModelId(pub SharedString);
 
 #[derive(Clone, Eq, PartialEq, Hash, Debug, Ord, PartialOrd)]

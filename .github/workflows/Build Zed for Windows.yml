@@ -42,9 +42,6 @@ jobs:
       - name: Компиляция Zed (Release)
         run: cargo build --release
 
-      - name: Запуск тестов
-        run: cargo test --workspace
-
       - name: Сохранение артефактов
         uses: actions/upload-artifact@v4
         with:

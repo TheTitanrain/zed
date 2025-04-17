@@ -37,7 +37,7 @@ jobs:
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
           choco install visualstudio2022buildtools -y
           choco install visualstudio2022-workload-vctools -y
-        shell: bash
+        shell: cmd
 
       - name: Компиляция Zed (Release)
         run: cargo build --release

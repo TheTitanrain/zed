@@ -35,19 +35,8 @@ jobs:
       - name: Установка зависимостей (CMake, MSVC)
         run: |
           choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          choco install visualstudio2022buildtools -y
+          choco install visualstudio2022buildtools --yes --package-parameters="--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended --includeOptional --quiet --norestart"
           choco install visualstudio2022-workload-vctools -y
-        shell: cmd
-        
-      - name: Установка Windows SDK и Spectre-библиотек
-        run: |
-          "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe" ^
-          modify --installPath "C:\Program Files\Microsoft Visual Studio\2022\BuildTools" ^
-          --add Microsoft.VisualStudio.Component.Windows10SDK.20348 ^
-          --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 ^
-          --add Microsoft.VisualStudio.Component.Windows11SDK.26100 ^
-          --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre ^
-          --quiet --norestart
         shell: cmd
 
       - name: Компиляция Zed (Release)

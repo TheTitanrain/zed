@@ -27,23 +27,60 @@ jobs:
       - name: Checkout репозитория
         uses: actions/checkout@v4
 
+      - name: Установка зависимостей (CMake)
+        run: |
+          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
+        shell: cmd
+
+      - name: Установка зависимостей (MSVCBT)
+        run: |
+          choco install visualstudio2022buildtools --yes --package-parameters="--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended --includeOptional --quiet --norestart"
+        shell: cmd
+
+      - name: Установка зависимостей (MSVC)
+        run: |
+          choco install visualstudio2022-workload-vctools -y
+        shell: cmd
+
       - name: Установка Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      
+      - name: Кэш cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
 
-      - name: Установка зависимостей (CMake, MSVC)
-        run: |
-          choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-          choco install visualstudio2022buildtools --yes --package-parameters="--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended --includeOptional --quiet --norestart"
-          choco install visualstudio2022-workload-vctools -y
-        shell: cmd
+      - name: Кэш cargo target
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-target-
 
       - name: Компиляция Zed (Release)
         run: cargo build --release
 
-      - name: Сохранение артефактов
-        uses: actions/upload-artifact@v4
+      - name: Создание релиза
+        uses: softprops/action-gh-release@v2
         with:
-          name: zed-windows-build
-          path: target/release/
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Загрузка бинарника
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/zed.exe
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

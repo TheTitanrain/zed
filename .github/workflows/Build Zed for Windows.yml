@@ -2,8 +2,9 @@ name: Build Zed for Windows
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+  pull_request:
 
 jobs:
   build:

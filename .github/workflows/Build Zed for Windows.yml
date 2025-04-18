@@ -72,14 +72,8 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
+          files: target/release/zed${{ github.ref_name }}.exe
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Загрузка бинарника
-        uses: softprops/action-gh-release@v2
-        with:
-          files: target/release/zed.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

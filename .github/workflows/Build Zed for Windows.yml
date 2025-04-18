@@ -72,7 +72,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          files: target/release/zed${{ github.ref_name }}.exe
+          files: target/release/zed.exe
           draft: false
           prerelease: false
         env:

@@ -66,13 +66,18 @@ jobs:
 
       - name: Компиляция Zed (Release)
         run: cargo build --release
-
+        
+      - name: Archive exe
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/zed.exe -DestinationPath target/release/zed.zip
+        
       - name: Создание релиза
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
-          files: target/release/zed.exe
+          files: target/release/zed.zip
           draft: false
           prerelease: false
         env:

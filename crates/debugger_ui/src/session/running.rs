@@ -27,6 +27,7 @@ use project::{
 use rpc::proto::ViewId;
 use settings::Settings;
 use stack_frame_list::StackFrameList;
+use terminal_view::TerminalView;
 use ui::{
     ActiveTheme, AnyElement, App, Context, ContextMenu, DropdownMenu, FluentBuilder,
     InteractiveElement, IntoElement, Label, LabelCommon as _, ParentElement, Render, SharedString,
@@ -35,7 +36,7 @@ use ui::{
 use util::ResultExt;
 use variable_list::VariableList;
 use workspace::{
-    ActivePaneDecorator, DraggedTab, Item, Member, Pane, PaneGroup, Workspace,
+    ActivePaneDecorator, DraggedTab, Item, ItemHandle, Member, Pane, PaneGroup, Workspace,
     item::TabContentParams, move_item, pane::Event,
 };
 
@@ -50,6 +51,7 @@ pub struct RunningState {
     _subscriptions: Vec<Subscription>,
     stack_frame_list: Entity<stack_frame_list::StackFrameList>,
     loaded_sources_list: Entity<LoadedSourceList>,
+    pub debug_terminal: Entity<DebugTerminal>,
     module_list: Entity<module_list::ModuleList>,
     _console: Entity<Console>,
     breakpoint_list: Entity<BreakpointList>,
@@ -364,6 +366,40 @@ pub(crate) fn new_debugger_pane(
 
     ret
 }
+
+pub struct DebugTerminal {
+    pub terminal: Option<Entity<TerminalView>>,
+    focus_handle: FocusHandle,
+}
+
+impl DebugTerminal {
+    fn empty(cx: &mut Context<Self>) -> Self {
+        Self {
+            terminal: None,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+}
+
+impl gpui::Render for DebugTerminal {
+    fn render(&mut self, _window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        if let Some(terminal) = self.terminal.clone() {
+            terminal.into_any_element()
+        } else {
+            div().track_focus(&self.focus_handle).into_any_element()
+        }
+    }
+}
+impl Focusable for DebugTerminal {
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        if let Some(terminal) = self.terminal.as_ref() {
+            return terminal.focus_handle(cx);
+        } else {
+            self.focus_handle.clone()
+        }
+    }
+}
+
 impl RunningState {
     pub fn new(
         session: Entity<Session>,
@@ -379,6 +415,8 @@ impl RunningState {
         let stack_frame_list = cx.new(|cx| {
             StackFrameList::new(workspace.clone(), session.clone(), weak_state, window, cx)
         });
+
+        let debug_terminal = cx.new(DebugTerminal::empty);
 
         let variable_list =
             cx.new(|cx| VariableList::new(session.clone(), stack_frame_list.clone(), window, cx));
@@ -411,13 +449,26 @@ impl RunningState {
                             .log_err();
 
                         if let Some(thread_id) = thread_id {
-                            this.select_thread(*thread_id, cx);
+                            this.select_thread(*thread_id, window, cx);
                         }
                     }
                     SessionEvent::Threads => {
                         let threads = this.session.update(cx, |this, cx| this.threads(cx));
-                        this.select_current_thread(&threads, cx);
+                        this.select_current_thread(&threads, window, cx);
                     }
+                    SessionEvent::CapabilitiesLoaded => {
+                        let capabilities = this.capabilities(cx);
+                        if !capabilities.supports_modules_request.unwrap_or(false) {
+                            this.remove_pane_item(DebuggerPaneItem::Modules, window, cx);
+                        }
+                        if !capabilities
+                            .supports_loaded_sources_request
+                            .unwrap_or(false)
+                        {
+                            this.remove_pane_item(DebuggerPaneItem::LoadedSources, window, cx);
+                        }
+                    }
+
                     _ => {}
                 }
                 cx.notify()
@@ -439,6 +490,7 @@ impl RunningState {
                 &console,
                 &breakpoint_list,
                 &loaded_source_list,
+                &debug_terminal,
                 &mut pane_close_subscriptions,
                 window,
                 cx,
@@ -447,35 +499,14 @@ impl RunningState {
             workspace::PaneGroup::with_root(root)
         } else {
             pane_close_subscriptions.clear();
-            let module_list = if session
-                .read(cx)
-                .capabilities()
-                .supports_modules_request
-                .unwrap_or(false)
-            {
-                Some(&module_list)
-            } else {
-                None
-            };
-
-            let loaded_source_list = if session
-                .read(cx)
-                .capabilities()
-                .supports_loaded_sources_request
-                .unwrap_or(false)
-            {
-                Some(&loaded_source_list)
-            } else {
-                None
-            };
 
             let root = Self::default_pane_layout(
                 project,
                 &workspace,
                 &stack_frame_list,
                 &variable_list,
-                module_list,
-                loaded_source_list,
+                &module_list,
+                &loaded_source_list,
                 &console,
                 &breakpoint_list,
                 &mut pane_close_subscriptions,
@@ -502,6 +533,7 @@ impl RunningState {
             breakpoint_list,
             loaded_sources_list: loaded_source_list,
             pane_close_subscriptions,
+            debug_terminal,
             _schedule_serialize: None,
         }
     }
@@ -512,11 +544,6 @@ impl RunningState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        debug_assert!(
-            item_kind.is_supported(self.session.read(cx).capabilities()),
-            "We should only allow removing supported item kinds"
-        );
-
         if let Some((pane, item_id)) = self.panes.panes().iter().find_map(|pane| {
             Some(pane).zip(
                 pane.read(cx)
@@ -538,6 +565,90 @@ impl RunningState {
         self.panes.pane_at_pixel_position(position).is_some()
     }
 
+    fn create_sub_view(
+        &self,
+        item_kind: DebuggerPaneItem,
+        pane: &Entity<Pane>,
+        cx: &mut Context<Self>,
+    ) -> Box<dyn ItemHandle> {
+        match item_kind {
+            DebuggerPaneItem::Console => {
+                let weak_console = self._console.clone().downgrade();
+
+                Box::new(SubView::new(
+                    pane.focus_handle(cx),
+                    self._console.clone().into(),
+                    item_kind,
+                    Some(Box::new(move |cx| {
+                        weak_console
+                            .read_with(cx, |console, cx| console.show_indicator(cx))
+                            .unwrap_or_default()
+                    })),
+                    cx,
+                ))
+            }
+            DebuggerPaneItem::Variables => Box::new(SubView::new(
+                self.variable_list.focus_handle(cx),
+                self.variable_list.clone().into(),
+                item_kind,
+                None,
+                cx,
+            )),
+            DebuggerPaneItem::BreakpointList => Box::new(SubView::new(
+                self.breakpoint_list.focus_handle(cx),
+                self.breakpoint_list.clone().into(),
+                item_kind,
+                None,
+                cx,
+            )),
+            DebuggerPaneItem::Frames => Box::new(SubView::new(
+                self.stack_frame_list.focus_handle(cx),
+                self.stack_frame_list.clone().into(),
+                item_kind,
+                None,
+                cx,
+            )),
+            DebuggerPaneItem::Modules => Box::new(SubView::new(
+                self.module_list.focus_handle(cx),
+                self.module_list.clone().into(),
+                item_kind,
+                None,
+                cx,
+            )),
+            DebuggerPaneItem::LoadedSources => Box::new(SubView::new(
+                self.loaded_sources_list.focus_handle(cx),
+                self.loaded_sources_list.clone().into(),
+                item_kind,
+                None,
+                cx,
+            )),
+            DebuggerPaneItem::Terminal => Box::new(SubView::new(
+                self.debug_terminal.focus_handle(cx),
+                self.debug_terminal.clone().into(),
+                item_kind,
+                None,
+                cx,
+            )),
+        }
+    }
+
+    pub(crate) fn ensure_pane_item(
+        &mut self,
+        item_kind: DebuggerPaneItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pane_items_status(cx).get(&item_kind) == Some(&true) {
+            return;
+        };
+        let pane = self.panes.last_pane();
+        let sub_view = self.create_sub_view(item_kind, &pane, cx);
+
+        pane.update(cx, |pane, cx| {
+            pane.add_item_inner(sub_view, false, false, false, None, window, cx);
+        })
+    }
+
     pub(crate) fn add_pane_item(
         &mut self,
         item_kind: DebuggerPaneItem,
@@ -551,58 +662,7 @@ impl RunningState {
         );
 
         if let Some(pane) = self.panes.pane_at_pixel_position(position) {
-            let sub_view = match item_kind {
-                DebuggerPaneItem::Console => {
-                    let weak_console = self._console.clone().downgrade();
-
-                    Box::new(SubView::new(
-                        pane.focus_handle(cx),
-                        self._console.clone().into(),
-                        item_kind,
-                        Some(Box::new(move |cx| {
-                            weak_console
-                                .read_with(cx, |console, cx| console.show_indicator(cx))
-                                .unwrap_or_default()
-                        })),
-                        cx,
-                    ))
-                }
-                DebuggerPaneItem::Variables => Box::new(SubView::new(
-                    self.variable_list.focus_handle(cx),
-                    self.variable_list.clone().into(),
-                    item_kind,
-                    None,
-                    cx,
-                )),
-                DebuggerPaneItem::BreakpointList => Box::new(SubView::new(
-                    self.breakpoint_list.focus_handle(cx),
-                    self.breakpoint_list.clone().into(),
-                    item_kind,
-                    None,
-                    cx,
-                )),
-                DebuggerPaneItem::Frames => Box::new(SubView::new(
-                    self.stack_frame_list.focus_handle(cx),
-                    self.stack_frame_list.clone().into(),
-                    item_kind,
-                    None,
-                    cx,
-                )),
-                DebuggerPaneItem::Modules => Box::new(SubView::new(
-                    self.module_list.focus_handle(cx),
-                    self.module_list.clone().into(),
-                    item_kind,
-                    None,
-                    cx,
-                )),
-                DebuggerPaneItem::LoadedSources => Box::new(SubView::new(
-                    self.loaded_sources_list.focus_handle(cx),
-                    self.loaded_sources_list.clone().into(),
-                    item_kind,
-                    None,
-                    cx,
-                )),
-            };
+            let sub_view = self.create_sub_view(item_kind, pane, cx);
 
             pane.update(cx, |pane, cx| {
                 pane.add_item(sub_view, false, false, None, window, cx);
@@ -744,6 +804,7 @@ impl RunningState {
     pub fn select_current_thread(
         &mut self,
         threads: &Vec<(Thread, ThreadStatus)>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let selected_thread = self
@@ -756,7 +817,7 @@ impl RunningState {
         };
 
         if Some(ThreadId(selected_thread.id)) != self.thread_id {
-            self.select_thread(ThreadId(selected_thread.id), cx);
+            self.select_thread(ThreadId(selected_thread.id), window, cx);
         }
     }
 
@@ -769,7 +830,7 @@ impl RunningState {
             .map(|id| self.session().read(cx).thread_status(id))
     }
 
-    fn select_thread(&mut self, thread_id: ThreadId, cx: &mut Context<Self>) {
+    fn select_thread(&mut self, thread_id: ThreadId, window: &mut Window, cx: &mut Context<Self>) {
         if self.thread_id.is_some_and(|id| id == thread_id) {
             return;
         }
@@ -777,8 +838,7 @@ impl RunningState {
         self.thread_id = Some(thread_id);
 
         self.stack_frame_list
-            .update(cx, |list, cx| list.refresh(cx));
-        cx.notify();
+            .update(cx, |list, cx| list.schedule_refresh(true, window, cx));
     }
 
     pub fn continue_thread(&mut self, cx: &mut Context<Self>) {
@@ -930,9 +990,9 @@ impl RunningState {
                 for (thread, _) in threads {
                     let state = state.clone();
                     let thread_id = thread.id;
-                    this = this.entry(thread.name, None, move |_, cx| {
+                    this = this.entry(thread.name, None, move |window, cx| {
                         state.update(cx, |state, cx| {
-                            state.select_thread(ThreadId(thread_id), cx);
+                            state.select_thread(ThreadId(thread_id), window, cx);
                         });
                     });
                 }
@@ -946,8 +1006,8 @@ impl RunningState {
         workspace: &WeakEntity<Workspace>,
         stack_frame_list: &Entity<StackFrameList>,
         variable_list: &Entity<VariableList>,
-        module_list: Option<&Entity<ModuleList>>,
-        loaded_source_list: Option<&Entity<LoadedSourceList>>,
+        module_list: &Entity<ModuleList>,
+        loaded_source_list: &Entity<LoadedSourceList>,
         console: &Entity<Console>,
         breakpoints: &Entity<BreakpointList>,
         subscriptions: &mut HashMap<EntityId, Subscription>,
@@ -1003,41 +1063,36 @@ impl RunningState {
                 window,
                 cx,
             );
-            if let Some(module_list) = module_list {
-                this.add_item(
-                    Box::new(SubView::new(
-                        module_list.focus_handle(cx),
-                        module_list.clone().into(),
-                        DebuggerPaneItem::Modules,
-                        None,
-                        cx,
-                    )),
-                    false,
-                    false,
+            this.add_item(
+                Box::new(SubView::new(
+                    module_list.focus_handle(cx),
+                    module_list.clone().into(),
+                    DebuggerPaneItem::Modules,
                     None,
-                    window,
                     cx,
-                );
-                this.activate_item(0, false, false, window, cx);
-            }
+                )),
+                false,
+                false,
+                None,
+                window,
+                cx,
+            );
 
-            if let Some(loaded_source_list) = loaded_source_list {
-                this.add_item(
-                    Box::new(SubView::new(
-                        loaded_source_list.focus_handle(cx),
-                        loaded_source_list.clone().into(),
-                        DebuggerPaneItem::LoadedSources,
-                        None,
-                        cx,
-                    )),
-                    false,
-                    false,
+            this.add_item(
+                Box::new(SubView::new(
+                    loaded_source_list.focus_handle(cx),
+                    loaded_source_list.clone().into(),
+                    DebuggerPaneItem::LoadedSources,
                     None,
-                    window,
                     cx,
-                );
-                this.activate_item(1, false, false, window, cx);
-            }
+                )),
+                false,
+                false,
+                None,
+                window,
+                cx,
+            );
+            this.activate_item(0, false, false, window, cx);
         });
 
         let rightmost_pane = new_debugger_pane(workspace.clone(), project.clone(), window, cx);

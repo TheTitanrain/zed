@@ -11,10 +11,10 @@ use gpui::{
 use itertools::Itertools;
 use language::Buffer;
 use project::ProjectItem;
-use ui::{KeyBinding, PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
+use ui::{PopoverMenu, PopoverMenuHandle, Tooltip, prelude::*};
 use workspace::Workspace;
 
-use crate::context::{AgentContext, ContextKind};
+use crate::context::{AgentContextHandle, ContextKind};
 use crate::context_picker::ContextPicker;
 use crate::context_store::ContextStore;
 use crate::thread::Thread;
@@ -92,7 +92,9 @@ impl ContextStrip {
             self.context_store
                 .read(cx)
                 .context()
-                .flat_map(|context| AddedContext::new(context.clone(), prompt_store, project, cx))
+                .flat_map(|context| {
+                    AddedContext::new_pending(context.clone(), prompt_store, project, cx)
+                })
                 .collect::<Vec<_>>()
         } else {
             Vec::new()
@@ -288,7 +290,7 @@ impl ContextStrip {
         best.map(|(index, _, _)| index)
     }
 
-    fn open_context(&mut self, context: &AgentContext, window: &mut Window, cx: &mut App) {
+    fn open_context(&mut self, context: &AgentContextHandle, window: &mut Window, cx: &mut App) {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -309,7 +311,7 @@ impl ContextStrip {
             };
 
             self.context_store.update(cx, |this, cx| {
-                this.remove_context(&context.context, cx);
+                this.remove_context(&context.handle, cx);
             });
 
             let is_now_empty = added_contexts.len() == 1;
@@ -355,7 +357,7 @@ impl Focusable for ContextStrip {
 }
 
 impl Render for ContextStrip {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let context_picker = self.context_picker.clone();
         let focus_handle = self.focus_handle.clone();
 
@@ -432,37 +434,13 @@ impl Render for ContextStrip {
                     })
                     .with_handle(self.context_picker_menu_handle.clone()),
             )
-            .when(no_added_context && suggested_context.is_none(), {
-                |parent| {
-                    parent.child(
-                        h_flex()
-                            .ml_1p5()
-                            .gap_2()
-                            .child(
-                                Label::new("Add Context")
-                                    .size(LabelSize::Small)
-                                    .color(Color::Muted),
-                            )
-                            .opacity(0.5)
-                            .children(
-                                KeyBinding::for_action_in(
-                                    &ToggleContextPicker,
-                                    &focus_handle,
-                                    window,
-                                    cx,
-                                )
-                                .map(|binding| binding.into_any_element()),
-                            ),
-                    )
-                }
-            })
             .children(
                 added_contexts
                     .into_iter()
                     .enumerate()
                     .map(|(i, added_context)| {
                         let name = added_context.name.clone();
-                        let context = added_context.context.clone();
+                        let context = added_context.handle.clone();
                         ContextPill::added(
                             added_context,
                             dupe_names.contains(&name),

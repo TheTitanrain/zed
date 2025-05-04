@@ -7,8 +7,8 @@ use crate::{
     FILE_HEADER_HEIGHT, FocusedBlock, GutterDimensions, HalfPageDown, HalfPageUp, HandleInput,
     HoveredCursor, InlayHintRefreshReason, InlineCompletion, JumpData, LineDown, LineHighlight,
     LineUp, MAX_LINE_LEN, MIN_LINE_NUMBER_DIGITS, MULTI_BUFFER_EXCERPT_HEADER_HEIGHT, OpenExcerpts,
-    PageDown, PageUp, Point, RowExt, RowRangeExt, SelectPhase, SelectedTextHighlight, Selection,
-    SoftWrap, StickyHeaderExcerpt, ToPoint, ToggleFold,
+    PageDown, PageUp, PhantomBreakpointIndicator, Point, RowExt, RowRangeExt, SelectPhase,
+    SelectedTextHighlight, Selection, SoftWrap, StickyHeaderExcerpt, ToPoint, ToggleFold,
     code_context_menus::{CodeActionsMenu, MENU_ASIDE_MAX_WIDTH, MENU_ASIDE_MIN_WIDTH, MENU_GAP},
     display_map::{
         Block, BlockContext, BlockStyle, DisplaySnapshot, FoldId, HighlightedChunk, ToDisplayPoint,
@@ -28,7 +28,6 @@ use crate::{
     scroll::scroll_amount::ScrollAmount,
 };
 use buffer_diff::{DiffHunkStatus, DiffHunkStatusKind};
-use client::ParticipantIndex;
 use collections::{BTreeMap, HashMap};
 use feature_flags::{DebuggerFeatureFlag, FeatureFlagAppExt};
 use file_icons::FileIcons;
@@ -59,6 +58,7 @@ use multi_buffer::{
     MultiBufferRow, RowInfo,
 };
 use project::{
+    ProjectPath,
     debugger::breakpoint_store::Breakpoint,
     project_settings::{self, GitGutterSetting, GitHunkStyleSetting, ProjectSettings},
 };
@@ -81,7 +81,7 @@ use theme::{ActiveTheme, Appearance, BufferLineHeight, PlayerColor};
 use ui::{ButtonLike, KeyBinding, POPOVER_Y_PADDING, Tooltip, h_flex, prelude::*};
 use unicode_segmentation::UnicodeSegmentation;
 use util::{RangeExt, ResultExt, debug_panic};
-use workspace::{Workspace, item::Item, notifications::NotifyTaskExt};
+use workspace::{CollaboratorId, Workspace, item::Item, notifications::NotifyTaskExt};
 
 const INLINE_BLAME_PADDING_EM_WIDTHS: f32 = 7.;
 
@@ -946,18 +946,45 @@ impl EditorElement {
                 .snapshot
                 .display_point_to_anchor(new_point, Bias::Left);
 
-            if position_map
+            if let Some((buffer_snapshot, file)) = position_map
                 .snapshot
                 .buffer_snapshot
                 .buffer_for_excerpt(buffer_anchor.excerpt_id)
-                .is_some_and(|buffer| buffer.file().is_some())
+                .and_then(|buffer| buffer.file().map(|file| (buffer, file)))
             {
                 let was_hovered = editor.gutter_breakpoint_indicator.0.is_some();
+                let as_point = text::ToPoint::to_point(&buffer_anchor.text_anchor, buffer_snapshot);
+
                 let is_visible = editor
                     .gutter_breakpoint_indicator
                     .0
-                    .map_or(false, |(_, is_active)| is_active);
-                editor.gutter_breakpoint_indicator.0 = Some((new_point, is_visible));
+                    .map_or(false, |indicator| indicator.is_active);
+
+                let has_existing_breakpoint =
+                    editor.breakpoint_store.as_ref().map_or(false, |store| {
+                        let Some(project) = &editor.project else {
+                            return false;
+                        };
+                        let Some(abs_path) = project.read(cx).absolute_path(
+                            &ProjectPath {
+                                path: file.path().clone(),
+                                worktree_id: file.worktree_id(cx),
+                            },
+                            cx,
+                        ) else {
+                            return false;
+                        };
+                        store
+                            .read(cx)
+                            .breakpoint_at_row(&abs_path, as_point.row, cx)
+                            .is_some()
+                    });
+
+                editor.gutter_breakpoint_indicator.0 = Some(PhantomBreakpointIndicator {
+                    display_row: new_point.row(),
+                    is_active: is_visible,
+                    collides_with_existing_breakpoint: has_existing_breakpoint,
+                });
 
                 editor.gutter_breakpoint_indicator.1.get_or_insert_with(|| {
                     cx.spawn(async move |this, cx| {
@@ -968,10 +995,8 @@ impl EditorElement {
                         }
 
                         this.update(cx, |this, cx| {
-                            if let Some((_, is_active)) =
-                                this.gutter_breakpoint_indicator.0.as_mut()
-                            {
-                                *is_active = true;
+                            if let Some(indicator) = this.gutter_breakpoint_indicator.0.as_mut() {
+                                indicator.is_active = true;
                             }
 
                             cx.notify();
@@ -1100,7 +1125,7 @@ impl EditorElement {
                         editor.cursor_shape,
                         &snapshot.display_snapshot,
                         is_newest,
-                        editor.leader_peer_id.is_none(),
+                        editor.leader_id.is_none(),
                         None,
                     );
                     if is_newest {
@@ -1124,18 +1149,29 @@ impl EditorElement {
 
             if let Some(collaboration_hub) = &editor.collaboration_hub {
                 // When following someone, render the local selections in their color.
-                if let Some(leader_id) = editor.leader_peer_id {
-                    if let Some(collaborator) = collaboration_hub.collaborators(cx).get(&leader_id)
-                    {
-                        if let Some(participant_index) = collaboration_hub
-                            .user_participant_indices(cx)
-                            .get(&collaborator.user_id)
-                        {
+                if let Some(leader_id) = editor.leader_id {
+                    match leader_id {
+                        CollaboratorId::PeerId(peer_id) => {
+                            if let Some(collaborator) =
+                                collaboration_hub.collaborators(cx).get(&peer_id)
+                            {
+                                if let Some(participant_index) = collaboration_hub
+                                    .user_participant_indices(cx)
+                                    .get(&collaborator.user_id)
+                                {
+                                    if let Some((local_selection_style, _)) = selections.first_mut()
+                                    {
+                                        *local_selection_style = cx
+                                            .theme()
+                                            .players()
+                                            .color_for_participant(participant_index.0);
+                                    }
+                                }
+                            }
+                        }
+                        CollaboratorId::Agent => {
                             if let Some((local_selection_style, _)) = selections.first_mut() {
-                                *local_selection_style = cx
-                                    .theme()
-                                    .players()
-                                    .color_for_participant(participant_index.0);
+                                *local_selection_style = cx.theme().players().agent();
                             }
                         }
                     }
@@ -1147,12 +1183,9 @@ impl EditorElement {
                     collaboration_hub.as_ref(),
                     cx,
                 ) {
-                    let selection_style =
-                        Self::get_participant_color(selection.participant_index, cx);
-
                     // Don't re-render the leader's selections, since the local selections
                     // match theirs.
-                    if Some(selection.peer_id) == editor.leader_peer_id {
+                    if Some(selection.collaborator_id) == editor.leader_id {
                         continue;
                     }
                     let key = HoveredCursor {
@@ -1165,7 +1198,7 @@ impl EditorElement {
 
                     remote_selections
                         .entry(selection.replica_id)
-                        .or_insert((selection_style, Vec::new()))
+                        .or_insert((selection.color, Vec::new()))
                         .1
                         .push(SelectionLayout::new(
                             selection.selection,
@@ -1220,9 +1253,11 @@ impl EditorElement {
                 collaboration_hub.deref(),
                 cx,
             ) {
-                let color = Self::get_participant_color(remote_selection.participant_index, cx);
-                add_cursor(remote_selection.selection.head(), color.cursor);
-                if Some(remote_selection.peer_id) == editor.leader_peer_id {
+                add_cursor(
+                    remote_selection.selection.head(),
+                    remote_selection.color.cursor,
+                );
+                if Some(remote_selection.collaborator_id) == editor.leader_id {
                     skip_local = true;
                 }
             }
@@ -2250,6 +2285,9 @@ impl EditorElement {
                     }
 
                     let display_row = multibuffer_point.to_display_point(snapshot).row();
+                    if !range.contains(&display_row) {
+                        return None;
+                    }
                     if row_infos
                         .get((display_row - range.start).0 as usize)
                         .is_some_and(|row_info| row_info.expand_info.is_some())
@@ -2415,14 +2453,6 @@ impl EditorElement {
         );
 
         Some(button)
-    }
-
-    fn get_participant_color(participant_index: Option<ParticipantIndex>, cx: &App) -> PlayerColor {
-        if let Some(index) = participant_index {
-            cx.theme().players().color_for_participant(index.0)
-        } else {
-            cx.theme().players().absent()
-        }
     }
 
     fn calculate_relative_line_numbers(
@@ -5652,9 +5682,7 @@ impl EditorElement {
     }
 
     fn paint_mouse_listeners(&mut self, layout: &EditorLayout, window: &mut Window, cx: &mut App) {
-        if !self.editor.read(cx).disable_scrolling {
-            self.paint_scroll_wheel_listener(layout, window, cx);
-        }
+        self.paint_scroll_wheel_listener(layout, window, cx);
 
         window.on_mouse_event({
             let position_map = layout.position_map.clone();
@@ -6847,7 +6875,12 @@ impl Element for EditorElement {
                     // The max scroll position for the top of the window
                     let max_scroll_top = if matches!(
                         snapshot.mode,
-                        EditorMode::AutoHeight { .. } | EditorMode::SingleLine { .. }
+                        EditorMode::SingleLine { .. }
+                            | EditorMode::AutoHeight { .. }
+                            | EditorMode::Full {
+                                sized_by_content: true,
+                                ..
+                            }
                     ) {
                         (max_row - height_in_lines + 1.).max(0.)
                     } else {
@@ -7063,23 +7096,28 @@ impl Element for EditorElement {
                     // line numbers so we don't paint a line number debug accent color if a user
                     // has their mouse over that line when a breakpoint isn't there
                     if cx.has_flag::<DebuggerFeatureFlag>() {
-                        let gutter_breakpoint_indicator =
-                            self.editor.read(cx).gutter_breakpoint_indicator.0;
-                        if let Some((gutter_breakpoint_point, _)) =
-                            gutter_breakpoint_indicator.filter(|(_, is_active)| *is_active)
-                        {
-                            breakpoint_rows
-                                .entry(gutter_breakpoint_point.row())
-                                .or_insert_with(|| {
-                                    let position = snapshot.display_point_to_anchor(
-                                        gutter_breakpoint_point,
-                                        Bias::Right,
-                                    );
-                                    let breakpoint = Breakpoint::new_standard();
-
-                                    (position, breakpoint)
-                                });
-                        }
+                        self.editor.update(cx, |editor, _| {
+                            if let Some(phantom_breakpoint) = &mut editor
+                                .gutter_breakpoint_indicator
+                                .0
+                                .filter(|phantom_breakpoint| phantom_breakpoint.is_active)
+                            {
+                                // Is there a non-phantom breakpoint on this line?
+                                phantom_breakpoint.collides_with_existing_breakpoint = true;
+                                breakpoint_rows
+                                    .entry(phantom_breakpoint.display_row)
+                                    .or_insert_with(|| {
+                                        let position = snapshot.display_point_to_anchor(
+                                            DisplayPoint::new(phantom_breakpoint.display_row, 0),
+                                            Bias::Right,
+                                        );
+                                        let breakpoint = Breakpoint::new_standard();
+                                        phantom_breakpoint.collides_with_existing_breakpoint =
+                                            false;
+                                        (position, breakpoint)
+                                    });
+                            }
+                        })
                     }
 
                     let mut expand_toggles =

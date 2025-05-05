@@ -1,4 +1,4 @@
-name: Build Zed for Windows
+name: Build Zed for Windows x64
 
 on:
   push:
@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-2022
 
     steps:
-      - name: Включение длинных путей в Windows
+      - name: Enabling Long Paths in Windows
         run: |
           reg add HKLM\SYSTEM\CurrentControlSet\Control\FileSystem /v LongPathsEnabled /t REG_DWORD /d 1 /f
         shell: cmd
@@ -18,7 +18,7 @@ jobs:
       - name: Настройка Git для поддержки длинных путей
         run: git config --global core.longpaths true
 
-      - name: Уменьшение длины пути для Cargo и Git
+      - name: Reducing path length for Cargo and Git
         run: |
           echo "CARGO_HOME=C:\cargo" >> $GITHUB_ENV
           echo "GIT_DIR=C:\git" >> $GITHUB_ENV
@@ -26,27 +26,17 @@ jobs:
       - name: Checkout репозитория
         uses: actions/checkout@v4
 
-      # - name: Установка зависимостей (CMake)
-      #   run: |
-      #     choco install cmake --installargs 'ADD_CMAKE_TO_PATH=System' -y
-      #   shell: cmd
-
-      - name: Установка зависимостей (MSVCBT)
+      - name: Installing Dependencies (MSVCBT)
         run: |
           choco install visualstudio2022buildtools --yes --package-parameters="--add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Runtimes.x86.x64.Spectre --add Microsoft.VisualStudio.Component.Windows11SDK.26100 --includeRecommended --includeOptional --quiet --norestart"
         shell: cmd
 
-      # - name: Установка зависимостей (MSVC)
-      #   run: |
-      #     choco install visualstudio2022-workload-vctools -y
-      #   shell: cmd
-
-      - name: Установка Rust
+      - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
       
-      - name: Кэш cargo registry
+      - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: |
@@ -56,7 +46,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-registry-
 
-      - name: Кэш cargo target
+      - name: Cache cargo target
         uses: actions/cache@v4
         with:
           path: target
@@ -64,15 +54,15 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-target-
 
-      - name: Компиляция Zed (Release)
+      - name: Compile Zed (Release)
         run: cargo build --release
         
-      - name: Archive exe
+      - name: Archiv zed.exe
         shell: pwsh
         run: |
           Compress-Archive -Path target/release/zed.exe -DestinationPath target/release/zed.zip
         
-      - name: Создание релиза
+      - name: Creating a release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}

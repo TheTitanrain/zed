@@ -1,6 +1,4 @@
-use crate::{
-    Keep, KeepAll, OpenAgentDiff, Reject, RejectAll, Thread, ThreadEvent, ui::AnimatedLabel,
-};
+use crate::{Keep, KeepAll, OpenAgentDiff, Reject, RejectAll, Thread, ThreadEvent};
 use anyhow::Result;
 use assistant_settings::AssistantSettings;
 use buffer_diff::DiffHunkStatus;
@@ -11,8 +9,9 @@ use editor::{
     scroll::Autoscroll,
 };
 use gpui::{
-    Action, AnyElement, AnyView, App, AppContext, Empty, Entity, EventEmitter, FocusHandle,
-    Focusable, Global, SharedString, Subscription, Task, WeakEntity, Window, prelude::*,
+    Action, Animation, AnimationExt, AnyElement, AnyView, App, AppContext, Empty, Entity,
+    EventEmitter, FocusHandle, Focusable, Global, SharedString, Subscription, Task, Transformation,
+    WeakEntity, Window, percentage, prelude::*,
 };
 
 use language::{Buffer, Capability, DiskState, OffsetRangeExt, Point};
@@ -25,8 +24,9 @@ use std::{
     collections::hash_map::Entry,
     ops::Range,
     sync::Arc,
+    time::Duration,
 };
-use ui::{Divider, IconButtonShape, KeyBinding, Tooltip, prelude::*, vertical_divider};
+use ui::{IconButtonShape, KeyBinding, Tooltip, prelude::*, vertical_divider};
 use util::ResultExt;
 use workspace::{
     Item, ItemHandle, ItemNavHistory, ToolbarItemEvent, ToolbarItemLocation, ToolbarItemView,
@@ -219,7 +219,7 @@ impl AgentDiffPane {
             .thread
             .read(cx)
             .summary()
-            .unwrap_or("Assistant Changes".into());
+            .unwrap_or("Agent Changes".into());
         if new_title != self.title {
             self.title = new_title;
             cx.emit(EditorEvent::TitleChanged);
@@ -324,10 +324,6 @@ fn keep_edits_in_ranges(
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) {
-    if thread.read(cx).is_generating() {
-        return;
-    }
-
     let diff_hunks_in_ranges = editor
         .diff_hunks_in_ranges(&ranges, buffer_snapshot)
         .collect::<Vec<_>>();
@@ -353,10 +349,6 @@ fn reject_edits_in_ranges(
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) {
-    if thread.read(cx).is_generating() {
-        return;
-    }
-
     let diff_hunks_in_ranges = editor
         .diff_hunks_in_ranges(&ranges, buffer_snapshot)
         .collect::<Vec<_>>();
@@ -481,7 +473,7 @@ impl Item for AgentDiffPane {
             .thread
             .read(cx)
             .summary()
-            .unwrap_or("Assistant Changes".into());
+            .unwrap_or("Agent Changes".into());
         Label::new(format!("Review: {}", summary))
             .color(if params.selected {
                 Color::Default
@@ -702,10 +694,6 @@ fn render_diff_hunk_controls(
     cx: &mut App,
 ) -> AnyElement {
     let editor = editor.clone();
-
-    if thread.read(cx).is_generating() {
-        return Empty.into_any();
-    }
 
     h_flex()
         .h(line_height)
@@ -990,9 +978,20 @@ impl ToolbarItemView for AgentDiffToolbar {
 
 impl Render for AgentDiffToolbar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let generating_label = div()
-            .w(rems_from_px(110.)) // Arbitrary size so the label doesn't dance around
-            .child(AnimatedLabel::new("Generating"))
+        let spinner_icon = div()
+            .px_0p5()
+            .id("generating")
+            .tooltip(Tooltip::text("Generating Changes…"))
+            .child(
+                Icon::new(IconName::LoadCircle)
+                    .size(IconSize::Small)
+                    .color(Color::Accent)
+                    .with_animation(
+                        "load_circle",
+                        Animation::new(Duration::from_secs(3)).repeat(),
+                        |icon, delta| icon.transform(Transformation::rotate(percentage(delta))),
+                    ),
+            )
             .into_any();
 
         let Some(active_item) = self.active_item.as_ref() else {
@@ -1009,7 +1008,7 @@ impl Render for AgentDiffToolbar {
 
                 let content = match state {
                     EditorState::Idle => return Empty.into_any(),
-                    EditorState::Generating => vec![generating_label],
+                    EditorState::Generating => vec![spinner_icon],
                     EditorState::Reviewing => vec![
                         h_flex()
                             .child(
@@ -1047,8 +1046,8 @@ impl Render for AgentDiffToolbar {
                                         }
                                     }),
                             )
-                            .into_any(),
-                        Divider::vertical().into_any_element(),
+                            .into_any_element(),
+                        vertical_divider().into_any_element(),
                         h_flex()
                             .gap_0p5()
                             .child(
@@ -1081,37 +1080,34 @@ impl Render for AgentDiffToolbar {
                                         this.dispatch_action(&KeepAll, window, cx)
                                     })),
                             )
-                            .into_any(),
-                        Divider::vertical().into_any_element(),
+                            .into_any_element(),
                     ],
                 };
 
                 h_flex()
                     .track_focus(&editor_focus_handle)
                     .size_full()
-                    .child(
-                        h_flex()
-                            .py(DynamicSpacing::Base08.rems(cx))
-                            .px_2()
-                            .gap_1()
-                            .children(content)
-                            .when_some(editor.read(cx).workspace(), |this, _workspace| {
-                                this.child(
-                                    IconButton::new("review", IconName::ListCollapse)
-                                        .icon_size(IconSize::Small)
-                                        .tooltip(Tooltip::for_action_title_in(
-                                            "Review All Files",
-                                            &OpenAgentDiff,
-                                            &editor_focus_handle,
-                                        ))
-                                        .on_click({
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.dispatch_action(&OpenAgentDiff, window, cx);
-                                            })
-                                        }),
-                                )
-                            }),
-                    )
+                    .px_1()
+                    .mr_1()
+                    .gap_1()
+                    .children(content)
+                    .child(vertical_divider())
+                    .when_some(editor.read(cx).workspace(), |this, _workspace| {
+                        this.child(
+                            IconButton::new("review", IconName::ListCollapse)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::for_action_title_in(
+                                    "Review All Files",
+                                    &OpenAgentDiff,
+                                    &editor_focus_handle,
+                                ))
+                                .on_click({
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.dispatch_action(&OpenAgentDiff, window, cx);
+                                    })
+                                }),
+                        )
+                    })
                     .child(vertical_divider())
                     .on_action({
                         let editor = editor.clone();
@@ -1130,7 +1126,7 @@ impl Render for AgentDiffToolbar {
 
                 let is_generating = agent_diff.read(cx).thread.read(cx).is_generating();
                 if is_generating {
-                    return div().px_2().child(generating_label).into_any();
+                    return div().px_2().child(spinner_icon).into_any();
                 }
 
                 let is_empty = agent_diff.read(cx).multibuffer.read(cx).is_empty();
@@ -1141,7 +1137,8 @@ impl Render for AgentDiffToolbar {
                 let focus_handle = agent_diff.focus_handle(cx);
 
                 h_group_xl()
-                    .px_2()
+                    .my_neg_1()
+                    .py_1()
                     .items_center()
                     .flex_wrap()
                     .child(
@@ -1366,13 +1363,13 @@ impl AgentDiff {
             }
             // intentionally being exhaustive in case we add a variant we should handle
             ThreadEvent::Stopped(Ok(StopReason::ToolUse))
-            | ThreadEvent::UsageUpdated(_)
             | ThreadEvent::StreamedCompletion
             | ThreadEvent::ReceivedTextChunk
             | ThreadEvent::StreamedAssistantText(_, _)
             | ThreadEvent::StreamedAssistantThinking(_, _)
             | ThreadEvent::StreamedToolUse { .. }
             | ThreadEvent::InvalidToolInput { .. }
+            | ThreadEvent::MissingToolUse { .. }
             | ThreadEvent::MessageAdded(_)
             | ThreadEvent::MessageEdited(_)
             | ThreadEvent::MessageDeleted(_)
@@ -1748,7 +1745,6 @@ mod tests {
     use crate::{Keep, ThreadStore, thread_store};
     use assistant_settings::AssistantSettings;
     use assistant_tool::ToolWorkingSet;
-    use context_server::ContextServerSettings;
     use editor::EditorSettings;
     use gpui::{TestAppContext, UpdateGlobal, VisualTestContext};
     use project::{FakeFs, Project};
@@ -1771,7 +1767,6 @@ mod tests {
             thread_store::init(cx);
             workspace::init_settings(cx);
             ThemeSettings::register(cx);
-            ContextServerSettings::register(cx);
             EditorSettings::register(cx);
             language_model::init_settings(cx);
         });
@@ -1817,7 +1812,7 @@ mod tests {
             .await
             .unwrap();
         cx.update(|_, cx| {
-            action_log.update(cx, |log, cx| log.track_buffer(buffer.clone(), cx));
+            action_log.update(cx, |log, cx| log.buffer_read(buffer.clone(), cx));
             buffer.update(cx, |buffer, cx| {
                 buffer
                     .edit(
@@ -1928,7 +1923,6 @@ mod tests {
             thread_store::init(cx);
             workspace::init_settings(cx);
             ThemeSettings::register(cx);
-            ContextServerSettings::register(cx);
             EditorSettings::register(cx);
             language_model::init_settings(cx);
             workspace::register_project_item::<Editor>(cx);
@@ -2032,7 +2026,7 @@ mod tests {
 
         // Make changes
         cx.update(|_, cx| {
-            action_log.update(cx, |log, cx| log.track_buffer(buffer1.clone(), cx));
+            action_log.update(cx, |log, cx| log.buffer_read(buffer1.clone(), cx));
             buffer1.update(cx, |buffer, cx| {
                 buffer
                     .edit(
@@ -2049,7 +2043,7 @@ mod tests {
             });
             action_log.update(cx, |log, cx| log.buffer_edited(buffer1.clone(), cx));
 
-            action_log.update(cx, |log, cx| log.track_buffer(buffer2.clone(), cx));
+            action_log.update(cx, |log, cx| log.buffer_read(buffer2.clone(), cx));
             buffer2.update(cx, |buffer, cx| {
                 buffer
                     .edit(

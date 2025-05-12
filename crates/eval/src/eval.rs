@@ -52,7 +52,7 @@ struct Args {
     /// Model provider to use.
     #[arg(long, default_value = "anthropic")]
     provider: String,
-    #[arg(long, value_delimiter = ',', default_value = "rs,ts")]
+    #[arg(long, value_delimiter = ',', default_value = "rs,ts,py")]
     languages: Vec<String>,
     /// How many times to run each example.
     #[arg(long, default_value = "8")]
@@ -397,7 +397,7 @@ pub fn init(cx: &mut App) -> Arc<AgentAppState> {
     cx.observe_global::<SettingsStore>(move |cx| {
         let settings = &ProjectSettings::get_global(cx).node;
         let options = NodeBinaryOptions {
-            allow_path_lookup: !settings.ignore_system_version.unwrap_or_default(),
+            allow_path_lookup: !settings.ignore_system_version,
             allow_binary_download: true,
             use_paths: settings.path.as_ref().map(|node_path| {
                 let node_path = PathBuf::from(shellexpand::tilde(node_path).as_ref());
@@ -417,7 +417,7 @@ pub fn init(cx: &mut App) -> Arc<AgentAppState> {
         tx.send(Some(options)).log_err();
     })
     .detach();
-    let node_runtime = NodeRuntime::new(client.http_client(), rx);
+    let node_runtime = NodeRuntime::new(client.http_client(), None, rx);
 
     let extension_host_proxy = ExtensionHostProxy::global(cx);
 
@@ -426,7 +426,6 @@ pub fn init(cx: &mut App) -> Arc<AgentAppState> {
     language_model::init(client.clone(), cx);
     language_models::init(user_store.clone(), client.clone(), fs.clone(), cx);
     languages::init(languages.clone(), node_runtime.clone(), cx);
-    context_server::init(cx);
     prompt_store::init(cx);
     let stdout_is_a_pty = false;
     let prompt_builder = PromptBuilder::load(fs.clone(), stdout_is_a_pty, cx);

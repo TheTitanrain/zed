@@ -66,7 +66,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: Zed ${{ github.ref_name }} for Windows x64
+          name: Zed ${{ github.ref_name }} for Windows x64 Nightly
           files: target/release/zed.zip
           draft: false
           prerelease: true
